@@ -1,0 +1,18 @@
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        required: false
+        type: string
+        default: "ubuntu-22.04"
+jobs:
+  test:
+    name: Run Specs
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+      - name: Run Specs
+        run: bundle exec rspec spec --require fivemat --format Fivemat

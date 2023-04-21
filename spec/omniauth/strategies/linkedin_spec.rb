@@ -58,9 +58,8 @@ describe OmniAuth::Strategies::LinkedIn do
     end
 
     context 'api_version is v2' do
-      before :each do
-        subject.stub(:options => double('options', :api_version => 'v2').as_null_object)
-      end
+
+      subject { OmniAuth::Strategies::LinkedIn.new(nil, options: { :api_version => 'v2' }) }
 
       context 'and therefore has all the necessary fields' do
         it { expect(subject.info).to have_key :name }
