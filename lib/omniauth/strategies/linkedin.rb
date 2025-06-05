@@ -3,6 +3,24 @@ require 'omniauth-oauth2'
 module OmniAuth
   module Strategies
     class LinkedIn < OmniAuth::Strategies::OAuth2
+      V1_TO_V2_FIELD_MAP = {
+        'id' => 'id',
+        'email-address' => nil,
+        'first-name' => 'localizedFirstName',
+        'last-name' => 'localizedLastName',
+        'headline' => 'headline',
+        'location' => nil,
+        'industry' => 'industryName',
+        'picture-url' => 'profilePicture(displayImage~:playableStreams)',
+        'public-profile-url' => 'vanityName'
+      }
+
+      PROFILE_ENDPOINT = {
+        'v1' => '/v1/people/~',
+        'v2' => '/v2/me'
+      }
+
+      # Give your strategy a name.
       option :name, 'linkedin'
 
       option :client_options, {
@@ -11,20 +29,44 @@ module OmniAuth
         :token_url => 'https://www.linkedin.com/oauth/v2/accessToken'
       }
 
-      option :scope, 'r_liteprofile r_emailaddress'
-      option :fields, ['id', 'first-name', 'last-name', 'picture-url', 'email-address']
+      option :scope, 'r_basicprofile r_emailaddress'
+      option :fields, ['id', 'email-address', 'first-name', 'last-name', 'headline', 'location', 'industry', 'picture-url', 'public-profile-url']
+      option :api_version, 'v1'
 
       uid do
         raw_info['id']
       end
 
       info do
-        {
-          :email => email_address,
-          :first_name => localized_field('firstName'),
-          :last_name => localized_field('lastName'),
-          :picture_url => picture_url
-        }
+        if options.api_version == "v1"
+          {
+            :name => user_name,
+            :email => raw_info['emailAddress'],
+            :nickname => user_name,
+            :first_name => raw_info['firstName'],
+            :last_name => raw_info['lastName'],
+            :location => raw_info['location'],
+            :description => raw_info['headline'],
+            :image => raw_info['pictureUrl'],
+            :urls => {
+              'public_profile' => raw_info['publicProfileUrl']
+            }
+          }
+        elsif options.api_version == "v2"
+          {
+            :name => user_name,
+            :email => member_email,
+            :nickname => user_name,
+            :first_name => raw_info['localizedFirstName'],
+            :last_name => raw_info['localizedLastName'],
+            :location => nil,
+            :description => localized_field(raw_info['headline']),
+            :image => profile_picture,
+            :urls => {
+              'public_profile' => "https://www.linkedin.com/in/#{raw_info['vanityName']}"
+            }
+          }
+        end
       end
 
       extra do
@@ -51,90 +93,68 @@ module OmniAuth
         @raw_info ||= access_token.get(profile_endpoint).parsed
       end
 
+      def member_email
+        return @member_email if @member_email
+        contacts = access_token.get(contact_endpoint).parsed['elements']
+
+        emails = contacts.select { |i| i['type'] == 'EMAIL' }
+        available = emails.find { |i| i['primary'] } || emails.first
+        @member_email = available.presence && available['handle~']['emailAddress']
+      end
+
       private
 
-      def email_address
-        if options.fields.include? 'email-address'
-          fetch_email_address
-          parse_email_address
+      def option_fields
+        fields = options.fields
+        fields.map! do |f|
+          if options.api_version == 'v2'
+            V1_TO_V2_FIELD_MAP.fetch(f,f)
+          elsif !!options[:secure_image_url] && f == 'picture-url'
+            "picture-url;secure=true"
+          else
+            f
+          end
         end
+        fields.compact
       end
 
-      def fetch_email_address
-        @email_address_response ||= access_token.get(email_address_endpoint).parsed
+      def localized_field(field)
+        return nil unless field
+        locale = "#{field['preferredLocale']['language']}_#{field['preferredLocale']['country']}"
+        field['localized'][locale]
       end
 
-      def parse_email_address
-        return unless email_address_available?
-
-        @email_address_response['elements'].first['handle~']['emailAddress']
+      def profile_picture
+        return nil if raw_info['profilePicture'].to_s.empty?
+        raw_info['profilePicture']['displayImage~']['elements'].first['identifiers'].first['identifier']
       end
 
-      def email_address_available?
-        @email_address_response['elements'] &&
-          @email_address_response['elements'].is_a?(Array) &&
-          @email_address_response['elements'].first &&
-          @email_address_response['elements'].first['handle~']
+      def first_name
+        raw_info['firstName'] || raw_info['localizedFirstName']
       end
 
-      def fields_mapping
-        {
-          'id' => 'id',
-          'first-name' => 'firstName',
-          'last-name' => 'lastName',
-          'picture-url' => 'profilePicture(displayImage~:playableStreams)'
-        }
+      def last_name
+        raw_info['lastName'] || raw_info['localizedLastName']
       end
 
-      def fields
-        options.fields.each.with_object([]) do |field, result|
-          result << fields_mapping[field] if fields_mapping.has_key? field
-        end
+      def user_name
+        name = "#{first_name} #{last_name}"
+        name.empty? ? nil : name
       end
 
-      def localized_field field_name
-        return unless localized_field_available? field_name
-
-        raw_info[field_name]['localized'][field_locale(field_name)]
-      end
-
-      def field_locale field_name
-        "#{ raw_info[field_name]['preferredLocale']['language'] }_" \
-          "#{ raw_info[field_name]['preferredLocale']['country'] }"
-      end
-
-      def localized_field_available? field_name
-        raw_info[field_name] && raw_info[field_name]['localized']
-      end
-
-      def picture_url
-        return unless picture_available?
-
-        picture_references.last['identifiers'].first['identifier']
-      end
-
-      def picture_available?
-        raw_info['profilePicture'] &&
-          raw_info['profilePicture']['displayImage~'] &&
-          picture_references
-      end
-
-      def picture_references
-        raw_info['profilePicture']['displayImage~']['elements']
-      end
-
-      def email_address_endpoint
-        '/v2/emailAddress?q=members&projection=(elements*(handle~))'
+      def contact_endpoint
+        '/v2/clientAwareMemberHandles?q=members&projection=(elements*(primary,type,handle~))'
       end
 
       def profile_endpoint
-        "/v2/me?projection=(#{ fields.join(',') })"
-      end
-      
-      def token_params
-        super.tap do |params|
-          params.client_secret = options.client_secret
-        end
+        suffix = case options.api_version
+                 when 'v1'
+                   ":(#{option_fields.join(',')})?format=json"
+                 when 'v2'
+                   "?projection=(#{option_fields.join(',')})"
+                 end
+
+        PROFILE_ENDPOINT[options.api_version] + suffix
       end
     end
   end
